@@ -13,8 +13,6 @@ const DEEP_RED: (u8, u8, u8) = (137, 0, 0);
 const RED_WINE: (u8, u8, u8) = (69, 0, 0);
 
 fn main() {
-    let mut tries = 1;
-
     let windows = Window::all().expect("Could not retrieve the windows");
     let tibia_window = windows
         .iter()
@@ -26,7 +24,8 @@ fn main() {
     );
     let mut enigo = Enigo::new();
 
-    while tries <= 100 {
+    println!("Running program in loop...");
+    loop {
         let image_capture = tibia_window
             .capture_image()
             .expect("Was not able to capture screen in Tibia");
@@ -34,7 +33,7 @@ fn main() {
         // The first pixel of the health bar at the top.
         // It is used to check the color of the bar.
         let health_marker_one = image_capture
-            .get_pixel_checked(24, 66)
+            .get_pixel_checked(24, 66) // x: 12 y: 58 (without DPI)
             .expect("Pixel not on screen")
             .0;
         let health_marker_one: (u8, u8, u8) = (
@@ -43,10 +42,10 @@ fn main() {
             health_marker_one[2],
         );
 
-        // This marker is to exura when the char
-        // receieves more than 50 damage.
+        // This is still greenish but exura is not enough
+        // to heal the character to max level
         let health_marker_two = image_capture
-            .get_pixel_checked(980, 66)
+            .get_pixel_checked(720, 66) // x: 360 y: 58 (without DPI)
             .expect("Pixel not on screen")
             .0;
         let health_marker_two: (u8, u8, u8) = (
@@ -55,12 +54,21 @@ fn main() {
             health_marker_two[2],
         );
 
+        // This marker is to exura when the char
+        // receieves more than 50 damage.
+        let health_marker_three = image_capture
+            .get_pixel_checked(980, 66) // x: 490 y: 58 (without DPI)
+            .expect("Pixel not on screen")
+            .0;
+        let health_marker_three: (u8, u8, u8) = (
+            health_marker_three[0],
+            health_marker_three[1],
+            health_marker_three[2],
+        );
+
         if !is_tibia_open() {
-            println!("Tibia not opened. try #{tries}");
-            tries += 1;
+            sleep(Duration::from_secs(3));
             continue;
-        } else {
-            tries = 1;
         }
 
         if health_marker_one == DEEP_RED || health_marker_one == RED_WINE {
@@ -72,12 +80,16 @@ fn main() {
             enigo.key_click(Key::F3);
             sleep(Duration::from_secs(1));
         } else if !(health_marker_two == GREENISH || health_marker_two == FULL_GREEN) {
+            // exura gran
+            enigo.key_click(Key::F3);
+            sleep(Duration::from_secs(1));
+        } else if !(health_marker_three == GREENISH || health_marker_three == FULL_GREEN) {
             // exura
             enigo.key_click(Key::F4);
             sleep(Duration::from_secs(1));
         } else {
-            println!("All good.");
-            sleep(Duration::from_millis(100));
+            // println!("All good.");
+            sleep(Duration::from_millis(50));
         }
     }
 }
