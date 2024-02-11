@@ -67,15 +67,19 @@ fn main() {
         );
 
         if !is_tibia_open() {
+            println!("Tibia closed. Sleeping for 3 seconds...");
             sleep(Duration::from_secs(3));
             continue;
         }
 
-        if health_marker_one == DEEP_RED || health_marker_one == RED_WINE {
+        if health_marker_one == DEEP_RED
+            || health_marker_one == RED_WINE
+            || health_marker_one == RED
+        {
             // exura vita
             enigo.key_click(Key::F2);
             sleep(Duration::from_secs(1));
-        } else if health_marker_one == RED || health_marker_one == YELLOW {
+        } else if health_marker_one == YELLOW {
             // exura gran
             enigo.key_click(Key::F3);
             sleep(Duration::from_secs(1));
