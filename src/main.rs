@@ -1,105 +1,212 @@
+use anyhow::{anyhow, ensure, Context, Result};
 use enigo::{Enigo, Key, KeyboardControllable};
 use regex::Regex;
 use std::process::{Command, Stdio};
-use std::thread::sleep;
+use std::sync::mpsc;
+use std::thread::{self, sleep};
 use std::time::Duration;
 use xcap::Window;
 
-const FULL_GREEN: (u8, u8, u8) = (0, 137, 0);
-const GREENISH: (u8, u8, u8) = (79, 114, 3);
-const YELLOW: (u8, u8, u8) = (144, 110, 6);
-const RED: (u8, u8, u8) = (137, 34, 34);
-const DEEP_RED: (u8, u8, u8) = (137, 0, 0);
-const RED_WINE: (u8, u8, u8) = (69, 0, 0);
+// RGB colors for health marker
+const FULL_GREEN: RGB = RGB(0, 137, 0);
+const GREENISH: RGB = RGB(79, 114, 3);
+const YELLOW: RGB = RGB(144, 110, 6);
+const RED: RGB = RGB(137, 34, 34);
+const DEEP_RED: RGB = RGB(137, 0, 0);
+const RED_WINE: RGB = RGB(69, 0, 0);
 
-fn main() {
-    let windows = Window::all().expect("Could not retrieve the windows");
-    let tibia_window = windows
-        .iter()
-        .find(|w| w.app_name() == "Tibia")
-        .expect("Tibia should be open!");
-    assert!(
-        tibia_window.width() == 1440 && tibia_window.height() == 875,
-        "Mismatch in window size. Please make it full size."
-    );
-    let mut enigo = Enigo::new();
+// RGB colors for attack
+const ATTACK_AVAILABLE: RGB = RGB(56, 11, 0);
+const ATTACK_IN_COOLDOWN: RGB = RGB(184, 38, 1);
 
-    println!("Running program in loop...");
-    loop {
-        let image_capture = tibia_window
-            .capture_image()
-            .expect("Was not able to capture screen in Tibia");
+enum AttackStatus {
+    Free,
+    InCooldown,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+struct RGB(u8, u8, u8);
+
+#[derive(Copy, Clone)]
+struct TibiaMarkers {
+    health_marker_one: RGB,
+    health_marker_two: RGB,
+    health_marker_three: RGB,
+    attack_marker: RGB,
+}
+
+impl TibiaMarkers {
+    fn get_markers(window: &Window) -> Result<TibiaMarkers> {
+        let capture = window.capture_image()?;
 
         // The first pixel of the health bar at the top.
         // It is used to check the color of the bar.
-        let health_marker_one = image_capture
-            .get_pixel_checked(24, 66) // x: 12 y: 58 (without DPI)
-            .expect("Pixel not on screen")
+        // x: 12 y: 58 (without DPI)
+        let [r, g, b, _] = capture
+            .get_pixel_checked(24, 66)
+            .context("could not get pixels on first health marker")?
             .0;
-        let health_marker_one: (u8, u8, u8) = (
-            health_marker_one[0],
-            health_marker_one[1],
-            health_marker_one[2],
-        );
+        let health_marker_one = RGB(r, g, b);
 
         // This is still greenish but exura is not enough
         // to heal the character to max level
-        let health_marker_two = image_capture
-            .get_pixel_checked(720, 66) // x: 360 y: 58 (without DPI)
-            .expect("Pixel not on screen")
+        // x: 360 y: 58 (without DPI)
+        let [r, g, b, _] = capture
+            .get_pixel_checked(720, 66)
+            .context("could not get pixels on second health marker")?
             .0;
-        let health_marker_two: (u8, u8, u8) = (
-            health_marker_two[0],
-            health_marker_two[1],
-            health_marker_two[2],
-        );
+        let health_marker_two = RGB(r, g, b);
 
         // This marker is to exura when the char
         // receieves more than 50 damage.
-        let health_marker_three = image_capture
-            .get_pixel_checked(980, 66) // x: 490 y: 58 (without DPI)
-            .expect("Pixel not on screen")
+        // x: 490 y: 58 (without DPI)
+        let [r, g, b, _] = capture
+            .get_pixel_checked(980, 66)
+            .context("could not get pixels on third health marker")?
             .0;
-        let health_marker_three: (u8, u8, u8) = (
-            health_marker_three[0],
-            health_marker_three[1],
-            health_marker_three[2],
-        );
+        let health_marker_three = RGB(r, g, b);
 
-        if !is_tibia_open() {
-            println!("Tibia closed. Sleeping for 3 seconds...");
-            sleep(Duration::from_secs(3));
-            continue;
+        // Attack marker to know when cooldown is over
+        // x: 13 y: 786 (without DPI)
+        let [r, g, b, _] = capture
+            .get_pixel_checked(26, 1522)
+            .context("could not get pixels on attack marker")?
+            .0;
+        let attack_marker = RGB(r, g, b);
+
+        Ok(TibiaMarkers {
+            health_marker_one,
+            health_marker_two,
+            health_marker_three,
+            attack_marker,
+        })
+    }
+}
+
+// based on an image capture determine which key needs pressing for auto healing
+// if none then do nothing
+fn auto_healing_task(markers: TibiaMarkers) -> Option<Key> {
+    let health_marker_one = markers.health_marker_one;
+    let health_marker_two = markers.health_marker_two;
+    let health_marker_three = markers.health_marker_three;
+
+    if health_marker_one == DEEP_RED || health_marker_one == RED_WINE || health_marker_one == RED {
+        // exura vita
+        Some(Key::F2)
+    } else if health_marker_one == YELLOW {
+        // exura gran
+        Some(Key::F3)
+    } else if !(health_marker_two == GREENISH || health_marker_two == FULL_GREEN) {
+        // exura gran
+        Some(Key::F3)
+    } else if !(health_marker_three == GREENISH || health_marker_three == FULL_GREEN) {
+        // exura
+        Some(Key::F4)
+    } else {
+        None
+    }
+}
+
+fn attack_cooldown_task(tibia_markers: TibiaMarkers, prev_attack_status: &mut AttackStatus) {
+    let curr_attack_marker = tibia_markers.attack_marker;
+
+    match prev_attack_status {
+        AttackStatus::Free => {
+            // A. Not free anymore? Mark it as unavailable.
+            if curr_attack_marker == ATTACK_IN_COOLDOWN {
+                *prev_attack_status = AttackStatus::InCooldown;
+                return;
+            } else if curr_attack_marker == ATTACK_AVAILABLE {
+                // B. Still free? Do nothing.
+                return;
+            }
         }
-
-        if health_marker_one == DEEP_RED
-            || health_marker_one == RED_WINE
-            || health_marker_one == RED
-        {
-            // exura vita
-            enigo.key_click(Key::F2);
-            sleep(Duration::from_secs(1));
-        } else if health_marker_one == YELLOW {
-            // exura gran
-            enigo.key_click(Key::F3);
-            sleep(Duration::from_secs(1));
-        } else if !(health_marker_two == GREENISH || health_marker_two == FULL_GREEN) {
-            // exura gran
-            enigo.key_click(Key::F3);
-            sleep(Duration::from_secs(1));
-        } else if !(health_marker_three == GREENISH || health_marker_three == FULL_GREEN) {
-            // exura
-            enigo.key_click(Key::F4);
-            sleep(Duration::from_secs(1));
-        } else {
-            // println!("All good.");
-            sleep(Duration::from_millis(50));
+        AttackStatus::InCooldown => {
+            // A. Just transitioned to free? Beep then.
+            if curr_attack_marker == ATTACK_AVAILABLE {
+                beep().unwrap();
+                *prev_attack_status = AttackStatus::Free;
+                return;
+            } else if curr_attack_marker == ATTACK_IN_COOLDOWN {
+                // B. Still in cooldown? Do nothing.
+                return;
+            }
         }
     }
 }
 
+fn main() -> Result<()> {
+    let windows = Window::all()?;
+    let tibia_window = windows
+        .into_iter()
+        .find(|w| w.app_name() == "Tibia")
+        .ok_or(anyhow!("tibia not opened"))?;
+
+    ensure!(
+        tibia_window.width() == 1440 && tibia_window.height() == 875,
+        "mismatch in window size"
+    );
+
+    let (tx, rx) = mpsc::channel::<TibiaMarkers>();
+    let (tx2, rx2) = mpsc::channel::<TibiaMarkers>();
+
+    // healing thread
+    thread::spawn(move || {
+        let mut enigo = Enigo::new();
+        loop {
+            if !is_tibia_open() {
+                sleep(Duration::from_secs(3));
+                continue;
+            }
+
+            let mut latest_message = None;
+
+            while let Ok(message) = rx.try_recv() {
+                latest_message = Some(message);
+            }
+
+            if let Some(msg) = latest_message {
+                if let Some(key) = auto_healing_task(msg) {
+                    enigo.key_click(key);
+                    sleep(Duration::from_secs(1));
+                }
+            }
+        }
+    });
+
+    // attack beep thread
+    thread::spawn(move || {
+        let mut last_attack_status = AttackStatus::Free;
+        loop {
+            let mut latest_tibia_markers: Option<TibiaMarkers> = None;
+
+            while let Ok(tibia_markers_msg) = rx2.try_recv() {
+                latest_tibia_markers = Some(tibia_markers_msg);
+            }
+
+            if let Some(tm) = latest_tibia_markers {
+                attack_cooldown_task(tm, &mut last_attack_status);
+            }
+        }
+    });
+
+    loop {
+        let tibia_markers = TibiaMarkers::get_markers(&tibia_window)?;
+
+        tx.send(tibia_markers)?;
+        tx2.send(tibia_markers)?;
+
+        sleep(Duration::from_millis(50));
+    }
+}
+
+fn beep() -> Result<()> {
+    Command::new("osascript").arg("-e").arg("beep").output()?;
+    Ok(())
+}
+
 fn is_tibia_open() -> bool {
-    if macos_get_active_window_app_name() == "Tibia".to_string() {
+    if macos_get_active_window_app_name() == "Tibia" {
         true
     } else {
         false
