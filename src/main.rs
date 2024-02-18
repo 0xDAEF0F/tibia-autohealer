@@ -16,13 +16,8 @@ const DEEP_RED: RGB = RGB(137, 0, 0);
 const RED_WINE: RGB = RGB(69, 0, 0);
 
 // RGB colors for attack
-const ATTACK_AVAILABLE: RGB = RGB(56, 11, 0);
+// const ATTACK_AVAILABLE: RGB = RGB(56, 11, 0);
 const ATTACK_IN_COOLDOWN: RGB = RGB(184, 38, 1);
-
-enum AttackStatus {
-    Free,
-    InCooldown,
-}
 
 #[derive(Copy, Clone, PartialEq)]
 struct RGB(u8, u8, u8);
@@ -107,31 +102,12 @@ fn auto_healing_task(markers: TibiaMarkers) -> Option<Key> {
     }
 }
 
-fn attack_cooldown_task(tibia_markers: TibiaMarkers, prev_attack_status: &mut AttackStatus) {
-    let curr_attack_marker = tibia_markers.attack_marker;
+fn attack_cooldown_task(tibia_markers: TibiaMarkers) {
+    let attack_marker = tibia_markers.attack_marker;
 
-    match prev_attack_status {
-        AttackStatus::Free => {
-            // A. Not free anymore? Mark it as unavailable.
-            if curr_attack_marker == ATTACK_IN_COOLDOWN {
-                *prev_attack_status = AttackStatus::InCooldown;
-                return;
-            } else if curr_attack_marker == ATTACK_AVAILABLE {
-                // B. Still free? Do nothing.
-                return;
-            }
-        }
-        AttackStatus::InCooldown => {
-            // A. Just transitioned to free? Beep then.
-            if curr_attack_marker == ATTACK_AVAILABLE {
-                beep().unwrap();
-                *prev_attack_status = AttackStatus::Free;
-                return;
-            } else if curr_attack_marker == ATTACK_IN_COOLDOWN {
-                // B. Still in cooldown? Do nothing.
-                return;
-            }
-        }
+    if attack_marker == ATTACK_IN_COOLDOWN {
+        sleep(Duration::from_millis(1755));
+        beep().unwrap();
     }
 }
 
@@ -170,23 +146,24 @@ fn main() -> Result<()> {
                     enigo.key_click(key);
                     sleep(Duration::from_secs(1));
                 }
+            } else {
+                sleep(Duration::from_millis(50));
             }
         }
     });
 
     // attack beep thread
-    thread::spawn(move || {
-        let mut last_attack_status = AttackStatus::Free;
-        loop {
-            let mut latest_tibia_markers: Option<TibiaMarkers> = None;
+    thread::spawn(move || loop {
+        let mut latest_tibia_markers: Option<TibiaMarkers> = None;
 
-            while let Ok(tibia_markers_msg) = rx2.try_recv() {
-                latest_tibia_markers = Some(tibia_markers_msg);
-            }
+        while let Ok(tibia_markers_msg) = rx2.try_recv() {
+            latest_tibia_markers = Some(tibia_markers_msg);
+        }
 
-            if let Some(tm) = latest_tibia_markers {
-                attack_cooldown_task(tm, &mut last_attack_status);
-            }
+        if let Some(tm) = latest_tibia_markers {
+            attack_cooldown_task(tm);
+        } else {
+            sleep(Duration::from_millis(50));
         }
     });
 
