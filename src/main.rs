@@ -2,32 +2,32 @@ use anyhow::{anyhow, ensure, Context, Result};
 use enigo::{Enigo, Key, KeyboardControllable};
 use regex::Regex;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, sleep};
 use std::time::Duration;
 use xcap::Window;
 
 // RGB colors for health marker
-const FULL_GREEN: RGB = RGB(0, 137, 0);
-const GREENISH: RGB = RGB(79, 114, 3);
-const YELLOW: RGB = RGB(144, 110, 6);
-const RED: RGB = RGB(137, 34, 34);
-const DEEP_RED: RGB = RGB(137, 0, 0);
-const RED_WINE: RGB = RGB(69, 0, 0);
+const FULL_GREEN: Rgb = Rgb(0, 137, 0);
+const GREENISH: Rgb = Rgb(79, 114, 3);
+const YELLOW: Rgb = Rgb(144, 110, 6);
+const RED: Rgb = Rgb(137, 34, 34);
+const DEEP_RED: Rgb = Rgb(137, 0, 0);
+const RED_WINE: Rgb = Rgb(69, 0, 0);
 
 // RGB colors for attack
 // const ATTACK_AVAILABLE: RGB = RGB(56, 11, 0);
-const ATTACK_IN_COOLDOWN: RGB = RGB(184, 38, 1);
+const ATTACK_IN_COOLDOWN: Rgb = Rgb(184, 38, 1);
 
 #[derive(Copy, Clone, PartialEq)]
-struct RGB(u8, u8, u8);
+struct Rgb(u8, u8, u8);
 
 #[derive(Copy, Clone)]
 struct TibiaMarkers {
-    health_marker_one: RGB,
-    health_marker_two: RGB,
-    health_marker_three: RGB,
-    attack_marker: RGB,
+    health_marker_one: Rgb,
+    health_marker_two: Rgb,
+    health_marker_three: Rgb,
+    attack_marker: Rgb,
 }
 
 impl TibiaMarkers {
@@ -41,7 +41,7 @@ impl TibiaMarkers {
             .get_pixel_checked(24, 66)
             .context("could not get pixels on first health marker")?
             .0;
-        let health_marker_one = RGB(r, g, b);
+        let health_marker_one = Rgb(r, g, b);
 
         // This is still greenish but exura is not enough
         // to heal the character to max level
@@ -50,7 +50,7 @@ impl TibiaMarkers {
             .get_pixel_checked(720, 66)
             .context("could not get pixels on second health marker")?
             .0;
-        let health_marker_two = RGB(r, g, b);
+        let health_marker_two = Rgb(r, g, b);
 
         // This marker is to exura when the char
         // receieves more than 50 damage.
@@ -59,7 +59,7 @@ impl TibiaMarkers {
             .get_pixel_checked(980, 66)
             .context("could not get pixels on third health marker")?
             .0;
-        let health_marker_three = RGB(r, g, b);
+        let health_marker_three = Rgb(r, g, b);
 
         // Attack marker to know when cooldown is over
         // x: 13 y: 786 (without DPI)
@@ -67,7 +67,7 @@ impl TibiaMarkers {
             .get_pixel_checked(26, 1522)
             .context("could not get pixels on attack marker")?
             .0;
-        let attack_marker = RGB(r, g, b);
+        let attack_marker = Rgb(r, g, b);
 
         Ok(TibiaMarkers {
             health_marker_one,
@@ -80,7 +80,7 @@ impl TibiaMarkers {
 
 // based on an image capture determine which key needs pressing for auto healing
 // if none then do nothing
-fn auto_healing_task(markers: TibiaMarkers) -> Option<Key> {
+fn auto_healing_task(markers: &TibiaMarkers) -> Option<Key> {
     let health_marker_one = markers.health_marker_one;
     let health_marker_two = markers.health_marker_two;
     let health_marker_three = markers.health_marker_three;
@@ -106,8 +106,10 @@ fn attack_cooldown_task(tibia_markers: TibiaMarkers) {
     let attack_marker = tibia_markers.attack_marker;
 
     if attack_marker == ATTACK_IN_COOLDOWN {
-        sleep(Duration::from_millis(1755));
+        sleep(Duration::from_millis(1900));
         beep().unwrap();
+    } else {
+        sleep(Duration::from_millis(50));
     }
 }
 
@@ -123,56 +125,41 @@ fn main() -> Result<()> {
         "mismatch in window size"
     );
 
-    let (tx, rx) = mpsc::channel::<TibiaMarkers>();
-    let (tx2, rx2) = mpsc::channel::<TibiaMarkers>();
+    let tibia_markers = Arc::new(RwLock::new(TibiaMarkers::get_markers(&tibia_window)?));
 
     // healing thread
+    let tibia_markers_clone = Arc::clone(&tibia_markers);
     thread::spawn(move || {
         let mut enigo = Enigo::new();
         loop {
-            if !is_tibia_open() {
+            if macos_get_active_window_app_name() != "Tibia" {
                 sleep(Duration::from_secs(3));
                 continue;
             }
 
-            let mut latest_message = None;
+            let tm = *tibia_markers_clone.read().unwrap();
 
-            while let Ok(message) = rx.try_recv() {
-                latest_message = Some(message);
-            }
-
-            if let Some(msg) = latest_message {
-                if let Some(key) = auto_healing_task(msg) {
+            match auto_healing_task(&tm) {
+                Some(key) => {
                     enigo.key_click(key);
                     sleep(Duration::from_secs(1));
                 }
-            } else {
-                sleep(Duration::from_millis(50));
+                None => sleep(Duration::from_millis(50)),
             }
         }
     });
 
-    // attack beep thread
+    // beep thread
+    let tibia_markers_clone = Arc::clone(&tibia_markers);
     thread::spawn(move || loop {
-        let mut latest_tibia_markers: Option<TibiaMarkers> = None;
-
-        while let Ok(tibia_markers_msg) = rx2.try_recv() {
-            latest_tibia_markers = Some(tibia_markers_msg);
-        }
-
-        if let Some(tm) = latest_tibia_markers {
-            attack_cooldown_task(tm);
-        } else {
-            sleep(Duration::from_millis(50));
-        }
+        let latest_tibia_markers = *tibia_markers_clone.read().unwrap();
+        attack_cooldown_task(latest_tibia_markers);
     });
 
+    // main thread will just update markers every 50ms
     loop {
-        let tibia_markers = TibiaMarkers::get_markers(&tibia_window)?;
-
-        tx.send(tibia_markers)?;
-        tx2.send(tibia_markers)?;
-
+        let tm = TibiaMarkers::get_markers(&tibia_window)?;
+        *tibia_markers.write().unwrap() = tm;
         sleep(Duration::from_millis(50));
     }
 }
@@ -180,14 +167,6 @@ fn main() -> Result<()> {
 fn beep() -> Result<()> {
     Command::new("osascript").arg("-e").arg("beep").output()?;
     Ok(())
-}
-
-fn is_tibia_open() -> bool {
-    if macos_get_active_window_app_name() == "Tibia" {
-        true
-    } else {
-        false
-    }
 }
 
 fn macos_get_active_window_app_name() -> String {
@@ -200,7 +179,7 @@ fn macos_get_active_window_app_name() -> String {
 
     let mut app_name = String::from_utf8(output.stdout)
         .expect("Output was not UTF-8")
-        .replace("\n", "");
+        .replace('\n', "");
 
     app_name = extract_app_name(app_name);
     app_name
