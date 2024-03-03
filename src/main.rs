@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Ok, Result};
 use enigo::{Enigo, Key, KeyboardControllable};
 use regex::Regex;
 use std::process::{Command, Stdio};
@@ -16,22 +16,32 @@ const DEEP_RED: Rgb = Rgb(137, 0, 0);
 const RED_WINE: Rgb = Rgb(69, 0, 0);
 
 // RGB colors for attack
-// const ATTACK_AVAILABLE: RGB = RGB(56, 11, 0);
+const ATTACK_AVAILABLE: Rgb = Rgb(56, 11, 0);
 const ATTACK_IN_COOLDOWN: Rgb = Rgb(184, 38, 1);
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(PartialEq, Eq, Copy, Clone)]
 struct Rgb(u8, u8, u8);
 
-#[derive(Copy, Clone)]
 struct TibiaMarkers {
     health_marker_one: Rgb,
     health_marker_two: Rgb,
     health_marker_three: Rgb,
-    attack_marker: Rgb,
+    prev_attack_marker: Rgb,
+    curr_attack_marker: Rgb,
 }
 
 impl TibiaMarkers {
-    fn get_markers(window: &Window) -> Result<TibiaMarkers> {
+    fn new() -> TibiaMarkers {
+        TibiaMarkers {
+            health_marker_one: FULL_GREEN,
+            health_marker_two: FULL_GREEN,
+            health_marker_three: FULL_GREEN,
+            prev_attack_marker: ATTACK_AVAILABLE,
+            curr_attack_marker: ATTACK_AVAILABLE,
+        }
+    }
+
+    fn update_markers(&mut self, window: &Window) -> Result<()> {
         let capture = window.capture_image()?;
 
         // The first pixel of the health bar at the top.
@@ -69,47 +79,46 @@ impl TibiaMarkers {
             .0;
         let attack_marker = Rgb(r, g, b);
 
-        Ok(TibiaMarkers {
+        *self = TibiaMarkers {
             health_marker_one,
             health_marker_two,
             health_marker_three,
-            attack_marker,
-        })
+            prev_attack_marker: self.curr_attack_marker,
+            curr_attack_marker: attack_marker,
+        };
+
+        Ok(())
     }
 }
 
 // based on an image capture determine which key needs pressing for auto healing
 // if none then do nothing
 fn auto_healing_task(markers: &TibiaMarkers) -> Option<Key> {
-    let health_marker_one = markers.health_marker_one;
-    let health_marker_two = markers.health_marker_two;
-    let health_marker_three = markers.health_marker_three;
+    match &markers.health_marker_one {
+        &DEEP_RED | &RED_WINE | &RED => return Some(Key::F2), // exura vita
+        &YELLOW => return Some(Key::F3),                      // exura gran
+        _ => {}
+    };
 
-    if health_marker_one == DEEP_RED || health_marker_one == RED_WINE || health_marker_one == RED {
-        // exura vita
-        Some(Key::F2)
-    } else if health_marker_one == YELLOW {
-        // exura gran
-        Some(Key::F3)
-    } else if !(health_marker_two == GREENISH || health_marker_two == FULL_GREEN) {
-        // exura gran
-        Some(Key::F3)
-    } else if !(health_marker_three == GREENISH || health_marker_three == FULL_GREEN) {
-        // exura
-        Some(Key::F4)
-    } else {
-        None
+    // exura gran
+    match &markers.health_marker_two {
+        &GREENISH | &FULL_GREEN => {}
+        _ => return Some(Key::F3), // exura gran
+    };
+
+    match &markers.health_marker_three {
+        &GREENISH | &FULL_GREEN => None,
+        _ => Some(Key::F4), // exura
     }
 }
 
-fn attack_cooldown_task(tibia_markers: TibiaMarkers) {
-    let attack_marker = tibia_markers.attack_marker;
-
-    if attack_marker == ATTACK_IN_COOLDOWN {
-        sleep(Duration::from_millis(1900));
+fn attack_cooldown_task(tibia_markers: &TibiaMarkers) {
+    if tibia_markers.prev_attack_marker == ATTACK_IN_COOLDOWN
+        && tibia_markers.curr_attack_marker == ATTACK_AVAILABLE
+    {
         beep().unwrap();
     } else {
-        sleep(Duration::from_millis(50));
+        sleep(Duration::from_millis(5));
     }
 }
 
@@ -125,7 +134,7 @@ fn main() -> Result<()> {
         "mismatch in window size"
     );
 
-    let tibia_markers = Arc::new(RwLock::new(TibiaMarkers::get_markers(&tibia_window)?));
+    let tibia_markers = Arc::new(RwLock::new(TibiaMarkers::new()));
 
     // healing thread
     let tibia_markers_clone = Arc::clone(&tibia_markers);
@@ -137,14 +146,14 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            let tm = *tibia_markers_clone.read().unwrap();
+            let tm = tibia_markers_clone.read().unwrap();
 
             match auto_healing_task(&tm) {
                 Some(key) => {
                     enigo.key_click(key);
                     sleep(Duration::from_secs(1));
                 }
-                None => sleep(Duration::from_millis(50)),
+                None => sleep(Duration::from_millis(5)),
             }
         }
     });
@@ -152,15 +161,14 @@ fn main() -> Result<()> {
     // beep thread
     let tibia_markers_clone = Arc::clone(&tibia_markers);
     thread::spawn(move || loop {
-        let latest_tibia_markers = *tibia_markers_clone.read().unwrap();
-        attack_cooldown_task(latest_tibia_markers);
+        attack_cooldown_task(&tibia_markers_clone.read().unwrap());
     });
 
     // main thread will just update markers every 50ms
     loop {
-        let tm = TibiaMarkers::get_markers(&tibia_window)?;
-        *tibia_markers.write().unwrap() = tm;
-        sleep(Duration::from_millis(50));
+        let tm = &mut tibia_markers.write().unwrap();
+        tm.update_markers(&tibia_window)?;
+        sleep(Duration::from_millis(5));
     }
 }
 
